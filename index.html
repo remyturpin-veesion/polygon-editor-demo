@@ -2,3 +2,1472 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Fast — Edit detection zone (prototype)</title>
+<style>
+  :root {
+    /* Fast app design tokens (light theme, taken from app screenshots) */
+    --bg: #FFFFFF;
+    --surface: #F4F4F6;
+    --surface-2: #ECEEF2;
+    --border: #E5E7EB;
+    --text: #1B1F2A;
+    --text-2: #4B5563;
+    --muted: #6B7280;
+    --accent: #2E5FE8;
+    --accent-tint: #EAF0FE;
+    --danger: #C8242A;
+    --danger-tint: #FCE9EA;
+    --danger-tint-2: #F8D7D9;
+    --warning: #E8A33E;
+
+    /* Editor-specific */
+    --vertex: #E8A33E;
+    --vertex-selected: #2E5FE8;
+    --edge: #2E5FE8;
+    --fill: rgba(46, 95, 232, 0.18);
+    --halo: rgba(46, 95, 232, 0.20);
+    --halo-stroke: rgba(46, 95, 232, 0.55);
+
+    --shadow-sm: 0 1px 2px rgba(20,30,60,0.06);
+    --shadow-md: 0 6px 20px rgba(20,30,60,0.10);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #DCDFE6;
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Helvetica, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  button, input { font-family: inherit; }
+
+  /* ============================================================ */
+  /* Form-factor selector (desktop only)                          */
+  /* ============================================================ */
+  .formfactor {
+    position: fixed;
+    top: 12px; right: 12px;
+    z-index: 100;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 4px;
+    display: flex; gap: 2px;
+    font-size: 12px;
+    box-shadow: var(--shadow-sm);
+  }
+  .formfactor button {
+    background: transparent;
+    border: 0;
+    color: var(--muted);
+    padding: 6px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .formfactor button.active {
+    background: var(--accent);
+    color: white;
+  }
+  @media (max-width: 720px) {
+    .formfactor { display: none; }
+  }
+
+  .stage {
+    width: 100vw; height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+    padding: 24px;
+    background:
+      radial-gradient(ellipse at top, #ECEFF5 0%, #DCDFE6 60%);
+  }
+
+  /* ============================================================ */
+  /* PHONE FRAME (desktop preview)                                */
+  /* ============================================================ */
+  .phone-frame {
+    width: 390px; height: 800px;
+    background: #1A1A1A;
+    border-radius: 44px;
+    padding: 10px;
+    box-shadow:
+      0 30px 80px rgba(20,30,60,0.30),
+      0 0 0 1px rgba(0,0,0,0.06);
+    position: relative;
+  }
+  .phone-frame::before {
+    content: "";
+    position: absolute;
+    top: 18px; left: 50%; transform: translateX(-50%);
+    width: 110px; height: 28px;
+    background: #1A1A1A;
+    border-radius: 999px;
+    z-index: 5;
+  }
+  .phone-frame .device {
+    width: 100%; height: 100%;
+    border-radius: 36px;
+    overflow: hidden;
+    position: relative;
+    background: var(--bg);
+  }
+  @media (max-width: 720px) {
+    .stage { padding: 0; }
+    .phone-frame {
+      width: 100vw; height: 100vh;
+      border-radius: 0;
+      padding: 0;
+      box-shadow: none;
+    }
+    .phone-frame::before { display: none; }
+    .phone-frame .device { border-radius: 0; }
+  }
+
+  /* ============================================================ */
+  /* TABLET / WEB FRAME                                           */
+  /* Side-by-side: canvas left, side panel right. */
+  /* ============================================================ */
+  .tablet-frame {
+    width: min(1200px, 95vw);
+    height: min(820px, 92vh);
+    background: #1A1A1A;
+    border-radius: 20px;
+    padding: 12px;
+    box-shadow:
+      0 30px 80px rgba(20,30,60,0.30),
+      0 0 0 1px rgba(0,0,0,0.06);
+  }
+  .tablet-frame .device {
+    width: 100%; height: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--bg);
+    position: relative;
+  }
+
+  /* ============================================================ */
+  /* PHONE LAYOUT                                                 */
+  /* ============================================================ */
+  .phone-ui {
+    display: flex; flex-direction: column;
+    height: 100%; width: 100%;
+    background: var(--bg);
+    padding-top: env(safe-area-inset-top, 0px);
+    min-height: 0;
+  }
+  .phone-ui > .statusbar,
+  .phone-ui > .topbar,
+  .phone-ui > .fast-button-dock {
+    flex-shrink: 0;
+  }
+  /* Scrollable body — everything between topbar and dock scrolls.
+     Dock stays anchored at the bottom; chips/menubar can't get squeezed. */
+  .phone-content {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    min-height: 0;
+    /* hide scrollbar like a real native app */
+    scrollbar-width: none;
+    padding-bottom: 4px;
+  }
+  .phone-content::-webkit-scrollbar { display: none; }
+
+  /* Status bar (fake, just for fidelity) */
+  .statusbar {
+    height: 44px;
+    display: flex; align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .statusbar .icons { display: flex; gap: 6px; opacity: 0.75; }
+
+  .topbar {
+    height: 52px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 12px;
+    background: var(--bg);
+  }
+  .topbar .back {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: transparent; border: 0; color: var(--text);
+    font-size: 22px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .topbar .title {
+    font-size: 18px; font-weight: 700; flex: 1;
+    color: var(--text);
+  }
+  .topbar .save {
+    background: var(--accent);
+    color: white; border: 0;
+    padding: 8px 16px; border-radius: 999px;
+    font-size: 14px; font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .category-row { padding: 4px 16px 12px; }
+
+  /* Vertical rhythm — every block uses one of these tokens.
+     --gap-tight (8px): items in the same group (image / menu / tools)
+     --gap-group (20px): between concept groups (tools / zones / commit)
+     --gap-section (28px): rare, only between the header block and main content */
+  :root {
+    --gap-tight: 8px;
+    --gap-group: 20px;
+    --gap-section: 28px;
+  }
+  .group-spacer { height: var(--gap-group); flex-shrink: 0; }
+  .section-label {
+    padding: 0 16px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .category-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--danger-tint);
+    color: var(--danger);
+    padding: 8px 14px;
+    border-radius: 12px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  /* Camera card — wraps the screenshot in the Fast pink-tinted frame.
+     Aspect ratio matches the source image (704x576 = 11/9) so the image
+     fills the card edge-to-edge — no awkward pink bars. */
+  .camera-card {
+    margin: 0 16px;
+    background: transparent;
+    border-radius: 0;
+    overflow: hidden;
+    aspect-ratio: 704 / 576;
+    position: relative;
+    flex-shrink: 0;
+  }
+  .camera-card svg.editor {
+    display: block;
+    width: 100%; height: 100%;
+    touch-action: none;
+    user-select: none;
+  }
+
+  /* Hint card — gesture cheat-sheet above the canvas.
+     2×2 grid: each gesture is a self-contained icon+verb+caption cell. */
+  .hint-card {
+    margin: 0 16px 12px;
+    background: var(--accent-tint);
+    border-radius: 12px;
+    padding: 12px 14px;
+  }
+  .hint-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 14px;
+  }
+  .hint-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+  }
+  .hint-item .hint-ic {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: white;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+  .hint-item .hint-text { min-width: 0; }
+  .hint-item .hint-verb {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.2;
+  }
+  .hint-item .hint-caption {
+    display: block;
+    font-size: 12px;
+    color: var(--text-2);
+    line-height: 1.3;
+    margin-top: 1px;
+  }
+
+
+  /* Status row */
+  /* Info strip (menubar) — sits 8px below the camera image,
+     surfaces live counts and image resolution at a glance.
+     Uses unified line-glyph icons (no emoji). */
+  .info-strip {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px 0;
+    color: var(--text-2);
+    font-size: 12.5px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    line-height: 1;
+  }
+  .info-strip::-webkit-scrollbar { display: none; }
+  .info-strip .info-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    line-height: 1;
+  }
+  .info-strip .info-item .ic {
+    color: var(--accent);
+    font-size: 13px;
+    line-height: 1;
+    width: 14px;
+    text-align: center;
+  }
+  .info-strip .info-item b {
+    color: var(--text);
+    font-weight: 700;
+  }
+  .info-strip .info-sep {
+    width: 1px;
+    height: 12px;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  .meta-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 16px 8px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .badge {
+    display: inline-flex; align-items: center;
+    background: var(--surface);
+    color: var(--muted);
+    padding: 4px 10px; border-radius: 999px;
+    font-size: 11.5px;
+    border: 1px solid var(--border);
+  }
+  .badge .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); margin-right: 6px;
+  }
+
+  /* Collapsible payload (engineering view) */
+  details.payload {
+    margin: 4px 16px 16px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+    overflow: hidden;
+  }
+  details.payload > summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: var(--muted);
+    user-select: none;
+  }
+  details.payload > summary::after {
+    content: "›"; float: right; transition: transform .2s;
+    color: var(--muted);
+  }
+  details.payload[open] > summary::after { transform: rotate(90deg); }
+  details.payload pre {
+    background: var(--surface);
+    color: #2C3340;
+    padding: 12px;
+    font-size: 11.5px;
+    overflow: auto;
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 160px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Bottom tab bar (visual only — for fidelity with Fast app chrome) */
+  .tabbar {
+    margin-top: auto;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+    padding: 8px 0 calc(env(safe-area-inset-bottom, 0px) + 6px);
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+  }
+  .tabbar .tab {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    padding: 6px;
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 500;
+  }
+  .tabbar .tab.active { color: var(--accent); }
+  .tabbar .tab .ic {
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 18px;
+  }
+
+  /* FastBanner.error — surface for the contextual "selected point" state.
+     Mirrors lib/presentation/shared/widgets/design_system/fast_banner.dart
+     with type: FastBannerType.error (lowContrast). */
+  .fast-banner-error {
+    display: none;
+    align-items: center;
+    gap: 12px;
+    background: var(--danger-tint);    /* lowContrastError.colorContainer */
+    border-radius: 12px;               /* FastRadius.small12 */
+    padding: 14px 14px;                /* FastSpacings.small16 */
+    margin: 0 16px 12px;
+  }
+  .fast-banner-error.visible { display: flex; }
+  .fast-banner-error .icon {
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--danger);
+    flex-shrink: 0;
+  }
+  .fast-banner-error .copy { flex: 1; min-width: 0; }
+  .fast-banner-error .copy .title {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--danger);              /* error.color */
+    line-height: 1.25;
+  }
+  .fast-banner-error .copy .subtitle {
+    font-size: 12.5px;
+    color: var(--danger);              /* lowContrastError.onColorContainer */
+    opacity: 0.85;
+    margin-top: 1px;
+  }
+  .fast-banner-error .delete {
+    flex-shrink: 0;
+    background: var(--danger);
+    color: white;
+    border: 0;
+    height: 40px;
+    padding: 0 14px;
+    border-radius: 8px;                /* FastRadius.small8 (FastButton default) */
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .fast-banner-error .delete:hover { filter: brightness(0.95); }
+  /* FastButtonDock — bottom-anchored decision zone.
+     Mirrors lib/presentation/shared/widgets/design_system/fast_button_dock.dart */
+  .fast-button-dock {
+    margin-top: auto;
+    background: var(--bg);             /* surfaceContainerLowest */
+    padding: 12px 0 calc(env(safe-area-inset-bottom, 0px) + 16px);
+    box-shadow: 0 -1px 0 var(--border);
+  }
+  .fast-button-dock .dock-content {
+    padding-top: 0;
+  }
+  .fast-button-dock .dock-divider {
+    display: none;
+  }
+  .fast-button-dock .dock-buttons {
+    display: flex;
+    gap: 12px;
+    padding: 0 16px;
+    justify-content: flex-end;
+  }
+  .fast-button-dock button.fast-btn {
+    height: 44px;
+    padding: 0 18px;
+    border-radius: 8px;                /* FastRadius.small8 */
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+    border: 1px solid transparent;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  .fast-button-dock button.fast-btn.outlined {
+    background: var(--bg);
+    color: var(--accent);              /* primary */
+    border-color: var(--border);       /* outlineVariant */
+  }
+  .fast-button-dock button.fast-btn.filled {
+    background: var(--accent);
+    color: white;
+  }
+  .fast-button-dock button.fast-btn.filled:disabled {
+    background: rgba(27, 31, 42, 0.08);
+    color: rgba(27, 31, 42, 0.38);     /* onSurface @ 0.38 (Fast disabled) */
+    cursor: not-allowed;
+  }
+  .fast-button-dock button.fast-btn.filled:hover:not(:disabled) { filter: brightness(0.97); }
+
+  /* Zone selector chips — multi-polygon picker */
+  .zones-row {
+    display: flex; gap: 8px;
+    padding: 0 16px 10px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .zones-row::-webkit-scrollbar { display: none; }
+  .zone-chip {
+    flex-shrink: 0;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 6px 8px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 8px;
+  }
+  .zone-chip .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #94A3B8;
+    flex-shrink: 0;
+  }
+  .zone-chip.active {
+    background: var(--accent-tint);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .zone-chip.active .dot { background: var(--accent); }
+  .zone-chip .count {
+    color: var(--muted);
+    font-weight: 500;
+    font-size: 12px;
+  }
+  .zone-chip.active .count { color: var(--accent); opacity: 0.85; }
+  .zone-chip .x {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--muted);
+    font-size: 12px;
+    margin-left: 2px;
+  }
+  .zone-chip .x:hover { background: var(--danger-tint); color: var(--danger); }
+  .zone-chip.add {
+    background: transparent;
+    border: 1px dashed var(--accent);
+    color: var(--accent);
+    padding: 8px 14px;
+  }
+
+  /* Vertical zones list (phone): one full-width row per polygon.
+     Same horizontal alignment as image / chips / hint (16px gutter). */
+  .zones-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 16px;
+  }
+  .zones-list .zone-chip {
+    width: 100%;
+    justify-content: flex-start;
+    padding: 12px 12px 12px 14px;
+    border-radius: 12px;
+    font-size: 14px;
+    line-height: 1.2;
+  }
+  .zones-list .zone-chip .lbl { flex: 0 0 auto; font-weight: 700; }
+  .zones-list .zone-chip .count {
+    flex: 1 1 auto;
+    text-align: right;
+    margin-right: 4px;
+    font-size: 12.5px;
+  }
+  .zones-list .zone-chip .x {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  /* + Add zone — tonal secondary button, not a dashed upload box. */
+  .zones-list .zone-chip.add {
+    justify-content: center;
+    padding: 12px 14px;
+    background: var(--accent-tint);
+    color: var(--accent);
+    border: 1px solid transparent;
+    font-weight: 700;
+  }
+  .zones-list .zone-chip.add:hover { background: #DCE6FD; }
+
+  /* Editing chips row — stays above the dock content */
+  .chips-row {
+    display: flex; gap: 8px;
+    padding: 0 16px 12px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .chips-row::-webkit-scrollbar { display: none; }
+  .chips-row.chips-under-image {
+    /* Same horizontal margin as the camera-card so the toolbar reads
+       as part of the same editing block. 8px gap above (tight). */
+    padding: 8px 16px 0;
+  }
+  .chip {
+    flex-shrink: 0;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    line-height: 1;
+  }
+  .chip .ic {
+    font-size: 15px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .chip.danger {
+    background: var(--danger-tint);
+    color: var(--danger);
+    border-color: var(--danger-tint-2);
+  }
+  .chip.danger:hover:not(:disabled) { background: var(--danger-tint-2); }
+  .chip:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .chip.icon-only {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    padding: 0;
+    font-size: 19px;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+  }
+
+  /* ============================================================ */
+  /* TABLET / WEB LAYOUT                                          */
+  /* ============================================================ */
+  .web-ui {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    grid-template-rows: 56px 1fr;
+    grid-template-areas:
+      "top top"
+      "canvas side";
+    height: 100%;
+    background: var(--bg);
+    min-height: 0;
+  }
+  .web-ui .topbar {
+    grid-area: top;
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .web-ui .topbar .back {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: transparent; border: 0; color: var(--text);
+    font-size: 22px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .web-ui .topbar .title { font-size: 16px; font-weight: 700; color: var(--text); }
+  .web-ui .topbar .crumb {
+    font-size: 13px; color: var(--muted); font-weight: 500;
+    margin-left: 8px;
+  }
+  .web-ui .canvas-wrap {
+    grid-area: canvas;
+    background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+    overflow: hidden;
+    position: relative;
+    min-width: 0; min-height: 0;
+  }
+  .web-ui .canvas-card {
+    background: transparent;
+    overflow: hidden;
+    position: relative;
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .web-ui .canvas-card svg.editor {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    aspect-ratio: 704 / 576;
+    touch-action: none; user-select: none;
+  }
+  /* Side panel: holds the same components as phone (hint, menubar,
+     chips, zones-list, dock) — single source of truth for the UI. */
+  .web-ui .side {
+    grid-area: side;
+    background: var(--bg);
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+  }
+  .web-ui .side .side-content {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+    padding: 16px 0 8px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .web-ui .side .side-content::-webkit-scrollbar { width: 6px; }
+  .web-ui .side .side-content::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  /* Tighten phone-derived components for the side-panel context. */
+  .web-ui .side .hint-card,
+  .web-ui .side .info-strip,
+  .web-ui .side .chips-row,
+  .web-ui .side .zones-list { margin-left: 16px; margin-right: 16px; padding-left: 0; padding-right: 0; }
+  .web-ui .side .info-strip { padding: 8px 0 0; }
+  .web-ui .side .chips-row { padding: 8px 0 0; }
+  .web-ui .side .group-spacer { height: var(--gap-group); }
+  .web-ui .side .fast-button-dock { flex-shrink: 0; }
+
+  code {
+    background: var(--surface);
+    padding: 1px 5px; border-radius: 4px;
+    font-size: 11.5px;
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+
+<div class="formfactor" role="tablist" aria-label="Form factor preview">
+  <button id="ff-phone" class="active">📱 Phone</button>
+  <button id="ff-tablet">💻 Tablet / Web</button>
+</div>
+
+<div class="stage" id="stage"></div>
+
+<!-- ============================================================ -->
+<!-- PHONE TEMPLATE                                                -->
+<!-- ============================================================ -->
+<template id="tpl-phone">
+  <div class="phone-ui">
+    <div class="statusbar">
+      <span>18:55</span>
+      <span class="icons">•••• 📶 🔋</span>
+    </div>
+    <div class="topbar">
+      <button class="back" aria-label="Back">‹</button>
+      <div class="title">Edit detection zone</div>
+      <span style="width:36px;"></span>
+    </div>
+    <div class="phone-content">
+    <div class="category-row">
+      <span class="category-pill">📹 Mon petit poney · Cash register</span>
+    </div>
+    <!-- Gesture cheat-sheet — 2×2 grid, scannable in one glance. -->
+    <div class="hint-card" role="group" aria-label="How to edit">
+      <div class="hint-grid">
+        <div class="hint-item">
+          <span class="hint-ic" aria-hidden="true">+</span>
+          <span class="hint-text">
+            <span class="hint-verb">Tap empty</span>
+            <span class="hint-caption">Add a point</span>
+          </span>
+        </div>
+        <div class="hint-item">
+          <span class="hint-ic" aria-hidden="true">◉</span>
+          <span class="hint-text">
+            <span class="hint-verb">Tap a point</span>
+            <span class="hint-caption">Select it</span>
+          </span>
+        </div>
+        <div class="hint-item">
+          <span class="hint-ic" aria-hidden="true">✥</span>
+          <span class="hint-text">
+            <span class="hint-verb">Drag inside</span>
+            <span class="hint-caption">Move the zone</span>
+          </span>
+        </div>
+        <div class="hint-item">
+          <span class="hint-ic" aria-hidden="true">▦</span>
+          <span class="hint-text">
+            <span class="hint-verb">Tap a grey zone</span>
+            <span class="hint-caption">Switch active</span>
+          </span>
+        </div>
+      </div>
+    </div>
+    <div class="camera-card">
+      <svg class="editor" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <!-- Info strip (menubar): live state, line-glyph icons. -->
+    <div class="info-strip">
+      <span class="info-item">
+        <span class="ic">◉</span>
+        <span><b data-bind="vcount">0</b> points</span>
+      </span>
+      <span class="info-sep"></span>
+      <span class="info-item">
+        <span class="ic">⊞</span>
+        <span data-bind="imgsize">— × —</span>
+      </span>
+      <span class="info-sep"></span>
+      <span class="info-item">
+        <span class="ic">▦</span>
+        <span><b data-bind="zcount">1</b> zone<span data-bind="zplural"></span></span>
+      </span>
+    </div>
+    <div class="chips-row chips-under-image">
+      <button class="chip" data-action="rect" title="Seed rectangle" aria-label="Seed rectangle">
+        <span class="ic">▭</span><span>Rect</span>
+      </button>
+      <button class="chip" data-action="undo" title="Undo" aria-label="Undo">
+        <span class="ic">↶</span><span>Undo</span>
+      </button>
+      <button class="chip" data-action="clear" title="Clear zone (empty all points)" aria-label="Clear zone">
+        <span class="ic">⌫</span><span>Clear</span>
+      </button>
+      <button class="chip danger" data-action="delete-selected" data-bind="del-point" title="Delete selected point" aria-label="Delete selected point">
+        <span class="ic">🗑</span><span>Delete</span>
+      </button>
+    </div>
+    <div class="group-spacer"></div>
+    <div class="zones-list" data-bind="zones"></div>
+    </div><!-- /phone-content -->
+
+    <div class="fast-button-dock">
+      <div class="dock-divider"></div>
+      <div class="dock-buttons">
+        <button class="fast-btn outlined" data-action="cancel">Cancel</button>
+        <button class="fast-btn filled" data-action="save">Save zones</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- ============================================================ -->
+<!-- TABLET / WEB TEMPLATE — canvas left, side-panel right.       -->
+<!-- Reuses the same hint / menubar / chips / zones / dock        -->
+<!-- components as the phone template (consistent UI everywhere). -->
+<!-- ============================================================ -->
+<template id="tpl-web">
+  <div class="web-ui">
+    <div class="topbar">
+      <button class="back" aria-label="Back">‹</button>
+      <div class="title">Edit detection zone</div>
+      <span class="crumb">📹 Mon petit poney · Cash register</span>
+    </div>
+    <div class="canvas-wrap">
+      <div class="canvas-card">
+        <svg class="editor" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+    </div>
+    <aside class="side">
+      <div class="side-content">
+        <!-- Same gesture cheat-sheet as phone -->
+        <div class="hint-card" role="group" aria-label="How to edit">
+          <div class="hint-grid">
+            <div class="hint-item">
+              <span class="hint-ic" aria-hidden="true">+</span>
+              <span class="hint-text">
+                <span class="hint-verb">Click empty</span>
+                <span class="hint-caption">Add a point</span>
+              </span>
+            </div>
+            <div class="hint-item">
+              <span class="hint-ic" aria-hidden="true">◉</span>
+              <span class="hint-text">
+                <span class="hint-verb">Click a point</span>
+                <span class="hint-caption">Select it</span>
+              </span>
+            </div>
+            <div class="hint-item">
+              <span class="hint-ic" aria-hidden="true">✥</span>
+              <span class="hint-text">
+                <span class="hint-verb">Drag inside</span>
+                <span class="hint-caption">Move the zone</span>
+              </span>
+            </div>
+            <div class="hint-item">
+              <span class="hint-ic" aria-hidden="true">▦</span>
+              <span class="hint-text">
+                <span class="hint-verb">Click a grey zone</span>
+                <span class="hint-caption">Switch active</span>
+              </span>
+            </div>
+          </div>
+        </div>
+        <!-- Same menubar as phone -->
+        <div class="info-strip">
+          <span class="info-item">
+            <span class="ic">◉</span>
+            <span><b data-bind="vcount">0</b> points</span>
+          </span>
+          <span class="info-sep"></span>
+          <span class="info-item">
+            <span class="ic">⊞</span>
+            <span data-bind="imgsize">— × —</span>
+          </span>
+          <span class="info-sep"></span>
+          <span class="info-item">
+            <span class="ic">▦</span>
+            <span><b data-bind="zcount">1</b> zone<span data-bind="zplural"></span></span>
+          </span>
+        </div>
+        <!-- Same chip toolbar as phone -->
+        <div class="chips-row">
+          <button class="chip" data-action="rect" title="Seed rectangle" aria-label="Seed rectangle">
+            <span class="ic">▭</span><span>Rect</span>
+          </button>
+          <button class="chip" data-action="undo" title="Undo" aria-label="Undo">
+            <span class="ic">↶</span><span>Undo</span>
+          </button>
+          <button class="chip" data-action="clear" title="Clear zone" aria-label="Clear zone">
+            <span class="ic">⌫</span><span>Clear</span>
+          </button>
+          <button class="chip danger" data-action="delete-selected" data-bind="del-point" title="Delete selected point" aria-label="Delete selected point">
+            <span class="ic">🗑</span><span>Delete</span>
+          </button>
+        </div>
+        <!-- Same vertical zones list as phone -->
+        <div class="group-spacer"></div>
+        <div class="zones-list" data-bind="zones"></div>
+      </div>
+      <!-- Same dock as phone -->
+      <div class="fast-button-dock">
+        <div class="dock-buttons">
+          <button class="fast-btn outlined" data-action="cancel">Cancel</button>
+          <button class="fast-btn filled" data-action="save">Save zones</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+</template>
+
+<script>
+// ================================================================
+// Editor state (shared across form factors)
+// ================================================================
+// Native dimensions of the embedded camera screenshot
+// (screenshot_suresnes_store.jpeg, 704x576). Polygon coordinates are in
+// these original-resolution pixels — the same units stream_config /
+// hd-upload / Manager-API already use.
+const IMG_W = 704, IMG_H = 576;
+const SCREENSHOT_DATA_URI = 'data:image/jpeg;base64,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';
+// Multi-polygon state:
+//   polygons[i] is a list of [x,y] points (image-space pixels).
+//   activeIndex is the polygon currently being edited.
+//   selectedIndex is the selected vertex *within* the active polygon, or null.
+let polygons = [[]];
+let activeIndex = 0;
+let selectedIndex = null;
+const HISTORY = [];
+const MAX_HISTORY = 30;
+const active = () => polygons[activeIndex];
+
+// ================================================================
+// Mount logic
+// ================================================================
+const stage = document.getElementById('stage');
+
+function mount(formFactor) {
+  stage.innerHTML = '';
+  const frame = document.createElement('div');
+  frame.className = formFactor === 'phone' ? 'phone-frame' : 'tablet-frame';
+  const device = document.createElement('div');
+  device.className = 'device';
+  frame.appendChild(device);
+  stage.appendChild(frame);
+
+  // Phone uses tpl-phone (vertical layout). Tablet uses tpl-web (canvas left,
+  // side-panel right) — both share the same component vocabulary.
+  const tpl = document.getElementById(formFactor === 'phone' ? 'tpl-phone' : 'tpl-web');
+  device.appendChild(tpl.content.cloneNode(true));
+
+  bindEditor(device);
+}
+
+document.getElementById('ff-phone').onclick = () => setFormFactor('phone');
+document.getElementById('ff-tablet').onclick = () => setFormFactor('tablet');
+function setFormFactor(ff) {
+  document.getElementById('ff-phone').classList.toggle('active', ff === 'phone');
+  document.getElementById('ff-tablet').classList.toggle('active', ff === 'tablet');
+  mount(ff);
+}
+
+// ================================================================
+// Editor binder
+// ================================================================
+function bindEditor(root) {
+  const svg = root.querySelector('svg.editor');
+  svg.setAttribute('viewBox', `0 0 ${IMG_W} ${IMG_H}`);
+
+  // Real camera screenshot (Suresnes store back-room, 704x576, base64 inlined).
+  const bg = document.createElementNS('http://www.w3.org/2000/svg', 'image');
+  bg.setAttributeNS('http://www.w3.org/1999/xlink', 'href', SCREENSHOT_DATA_URI);
+  bg.setAttribute('href', SCREENSHOT_DATA_URI);
+  bg.setAttribute('x', '0');
+  bg.setAttribute('y', '0');
+  bg.setAttribute('width', IMG_W);
+  bg.setAttribute('height', IMG_H);
+  bg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
+  svg.appendChild(bg);
+
+  const polyLayer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  svg.appendChild(polyLayer);
+
+  function bind(name, value) {
+    root.querySelectorAll(`[data-bind="${name}"]`).forEach(el => { el.textContent = value; });
+  }
+  bind('imgsize', `${IMG_W} × ${IMG_H}`);
+
+  function pushHistory() {
+    HISTORY.push({
+      polygons: JSON.parse(JSON.stringify(polygons)),
+      activeIndex,
+      selectedIndex,
+    });
+    if (HISTORY.length > MAX_HISTORY) HISTORY.shift();
+  }
+  function undo() {
+    if (!HISTORY.length) return;
+    const prev = HISTORY.pop();
+    polygons = prev.polygons;
+    activeIndex = Math.min(prev.activeIndex, polygons.length - 1);
+    selectedIndex = (prev.selectedIndex != null && prev.selectedIndex < active().length) ? prev.selectedIndex : null;
+    render();
+  }
+  function setSelected(idx) {
+    selectedIndex = (idx == null || idx < 0 || idx >= active().length) ? null : idx;
+  }
+  function deleteSelected() {
+    if (selectedIndex == null) return;
+    pushHistory();
+    active().splice(selectedIndex, 1);
+    selectedIndex = null;
+    render();
+  }
+  function setActive(idx) {
+    if (idx < 0 || idx >= polygons.length) return;
+    activeIndex = idx;
+    selectedIndex = null;
+  }
+  function addZone() {
+    pushHistory();
+    polygons.push([]);
+    activeIndex = polygons.length - 1;
+    selectedIndex = null;
+    render();
+  }
+  function deleteZone(idx) {
+    if (idx < 0 || idx >= polygons.length) return;
+    pushHistory();
+    polygons.splice(idx, 1);
+    if (polygons.length === 0) polygons.push([]); // keep editor workable
+    activeIndex = Math.max(0, Math.min(activeIndex, polygons.length - 1));
+    selectedIndex = null;
+    render();
+  }
+
+  function clientToImage(evt) {
+    const pt = svg.createSVGPoint();
+    pt.x = evt.clientX; pt.y = evt.clientY;
+    const ctm = svg.getScreenCTM().inverse();
+    const p = pt.matrixTransform(ctm);
+    return [Math.round(p.x), Math.round(p.y)];
+  }
+
+  function pointToSegment(p, a, b) {
+    const ax = a[0], ay = a[1], bx = b[0], by = b[1];
+    const dx = bx - ax, dy = by - ay;
+    const len2 = dx*dx + dy*dy || 1;
+    let t = ((p[0]-ax)*dx + (p[1]-ay)*dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + t*dx, cy = ay + t*dy;
+    return { dist: Math.hypot(p[0]-cx, p[1]-cy), projection: [Math.round(cx), Math.round(cy)] };
+  }
+
+  const VERTEX_HIT = 32;
+  const EDGE_HIT = 26;
+
+  // Hit tests scoped to the active polygon (editing happens there only).
+  function findEdgeHit(p) {
+    const poly = active();
+    let best = null;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i+1) % poly.length];
+      const r = pointToSegment(p, a, b);
+      if (r.dist < EDGE_HIT && (!best || r.dist < best.dist)) best = { ...r, edgeIndex: i };
+    }
+    return best;
+  }
+  function findVertexHit(p) {
+    const poly = active();
+    let best = null;
+    for (let i = 0; i < poly.length; i++) {
+      const v = poly[i];
+      const d = Math.hypot(v[0]-p[0], v[1]-p[1]);
+      if (d < VERTEX_HIT && (!best || d < best.dist)) best = { index: i, dist: d };
+    }
+    return best;
+  }
+  // Find any non-active polygon whose body contains p — used to switch active.
+  function findInactivePolygonHit(p) {
+    for (let i = 0; i < polygons.length; i++) {
+      if (i === activeIndex) continue;
+      if (pointInPolygon(p, polygons[i])) return i;
+    }
+    return -1;
+  }
+
+  // Ray casting — point-in-polygon. Used to start a whole-polygon drag.
+  function pointInPolygon(p, poly) {
+    if (poly.length < 3) return false;
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const [xi, yi] = poly[i], [xj, yj] = poly[j];
+      const intersect = ((yi > p[1]) !== (yj > p[1])) &&
+        (p[0] < (xj - xi) * (p[1] - yi) / ((yj - yi) || 1e-9) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+  function polygonCentroid(poly) {
+    if (!poly.length) return null;
+    let cx = 0, cy = 0;
+    for (const [x, y] of poly) { cx += x; cy += y; }
+    return [Math.round(cx / poly.length), Math.round(cy / poly.length)];
+  }
+
+  function render() {
+    polyLayer.innerHTML = '';
+    const NS = 'http://www.w3.org/2000/svg';
+
+    // 1) Inactive polygons — muted dashed outlines, no handles.
+    polygons.forEach((poly, i) => {
+      if (i === activeIndex || poly.length < 2) return;
+      const p = document.createElementNS(NS, 'polygon');
+      p.setAttribute('points', poly.map(pt => pt.join(',')).join(' '));
+      p.setAttribute('fill', 'rgba(148, 163, 184, 0.14)');
+      p.setAttribute('stroke', '#94A3B8');
+      p.setAttribute('stroke-width', '3');
+      p.setAttribute('stroke-dasharray', '8,6');
+      p.setAttribute('stroke-linejoin', 'round');
+      polyLayer.appendChild(p);
+      // small numeric label on the inactive polygon's centroid
+      if (poly.length >= 3) {
+        const c = polygonCentroid(poly);
+        const lbl = document.createElementNS(NS, 'text');
+        lbl.setAttribute('x', c[0]); lbl.setAttribute('y', c[1] + 6);
+        lbl.setAttribute('text-anchor', 'middle');
+        lbl.setAttribute('font-size', '20');
+        lbl.setAttribute('font-family', 'sans-serif');
+        lbl.setAttribute('font-weight', '700');
+        lbl.setAttribute('fill', '#64748B');
+        lbl.setAttribute('pointer-events', 'none');
+        lbl.textContent = `${i + 1}`;
+        polyLayer.appendChild(lbl);
+      }
+    });
+
+    // 2) Active polygon — full editor styling.
+    const poly = active();
+    if (poly.length >= 2) {
+      const path = document.createElementNS(NS, 'polygon');
+      path.setAttribute('points', poly.map(p => p.join(',')).join(' '));
+      path.setAttribute('fill', 'rgba(46, 95, 232, 0.18)');
+      path.setAttribute('stroke', '#2E5FE8');
+      path.setAttribute('stroke-width', '4');
+      path.setAttribute('stroke-linejoin', 'round');
+      polyLayer.appendChild(path);
+    }
+    if (poly.length >= 3) {
+      const c = polygonCentroid(poly);
+      const bg = document.createElementNS(NS, 'circle');
+      bg.setAttribute('cx', c[0]); bg.setAttribute('cy', c[1]);
+      bg.setAttribute('r', 18);
+      bg.setAttribute('fill', 'rgba(255,255,255,0.92)');
+      bg.setAttribute('stroke', '#2E5FE8');
+      bg.setAttribute('stroke-width', '2');
+      polyLayer.appendChild(bg);
+      const txt = document.createElementNS(NS, 'text');
+      txt.setAttribute('x', c[0]); txt.setAttribute('y', c[1] + 6);
+      txt.setAttribute('text-anchor', 'middle');
+      txt.setAttribute('font-size', '18');
+      txt.setAttribute('font-family', 'sans-serif');
+      txt.setAttribute('fill', '#2E5FE8');
+      txt.setAttribute('pointer-events', 'none');
+      txt.textContent = '✥';
+      polyLayer.appendChild(txt);
+    }
+    poly.forEach((pt, i) => {
+      const isSelected = (i === selectedIndex);
+      if (isSelected) {
+        const halo = document.createElementNS(NS, 'circle');
+        halo.setAttribute('cx', pt[0]); halo.setAttribute('cy', pt[1]);
+        halo.setAttribute('r', 30);
+        halo.setAttribute('fill', 'rgba(46, 95, 232, 0.18)');
+        halo.setAttribute('stroke', 'rgba(46, 95, 232, 0.55)');
+        halo.setAttribute('stroke-width', '2');
+        polyLayer.appendChild(halo);
+      }
+      const c = document.createElementNS(NS, 'circle');
+      c.setAttribute('cx', pt[0]); c.setAttribute('cy', pt[1]);
+      c.setAttribute('r', isSelected ? 16 : 14);
+      c.setAttribute('fill', isSelected ? '#2E5FE8' : '#E8A33E');
+      c.setAttribute('stroke', '#FFFFFF');
+      c.setAttribute('stroke-width', '3');
+      polyLayer.appendChild(c);
+    });
+
+    // 3) Sidebar/dock state.
+    const totalPoints = polygons.reduce((n, p) => n + p.length, 0);
+    bind('vcount', totalPoints);
+    bind('zcount', polygons.length);
+    bind('zplural', polygons.length === 1 ? '' : 's');
+    const validPolys = polygons.filter(p => p.length >= 3);
+    bind('payload', validPolys.length
+      ? validPolys
+          .map((poly, i) => `Polygon ${i + 1}: ${poly.map(([x, y]) => `${x},${y}`).join(';')}`)
+          .join('\n')
+      : '(no valid polygons — need at least one zone with ≥ 3 points)');
+
+    renderZoneChips(root);
+
+    // Save validity: at least one polygon must have ≥ 3 points.
+    const isSaveable = validPolys.length > 0;
+    root.querySelectorAll('[data-action="save"]').forEach(btn => {
+      btn.disabled = !isSaveable;
+      btn.title = isSaveable ? 'Save polygons' : 'At least one zone with ≥ 3 points is required';
+    });
+
+    // Delete-point chip: enabled only when a node is selected.
+    root.querySelectorAll('[data-bind="del-point"]').forEach(btn => {
+      btn.disabled = (selectedIndex == null);
+      btn.title = (selectedIndex == null) ? 'Select a point first' : 'Delete the selected point';
+    });
+  }
+
+  // Zone chips — one per polygon, plus an "+ Add zone" trailing chip.
+  function renderZoneChips(root) {
+    const host = root.querySelector('[data-bind="zones"]');
+    if (!host) return;
+    host.innerHTML = '';
+    polygons.forEach((poly, i) => {
+      const chip = document.createElement('button');
+      chip.className = 'zone-chip' + (i === activeIndex ? ' active' : '');
+      chip.dataset.zone = i;
+      const incomplete = poly.length > 0 && poly.length < 3;
+      chip.innerHTML = `
+        <span class="dot"></span>
+        <span class="lbl">Zone ${i + 1}</span>
+        <span class="count">${poly.length} pts${incomplete ? ' · incomplete' : ''}</span>
+        <span class="x" data-zone-delete="${i}" aria-label="Delete zone ${i + 1}">✕</span>
+      `;
+      host.appendChild(chip);
+    });
+    const add = document.createElement('button');
+    add.className = 'zone-chip add';
+    add.dataset.action = 'add-zone';
+    add.textContent = '+ Add zone';
+    host.appendChild(add);
+  }
+
+  // dragging: { kind: 'vertex', index } | { kind: 'polygon', start, snapshot }
+  let dragging = null;
+
+  svg.addEventListener('pointerdown', (evt) => {
+    evt.preventDefault();
+    svg.setPointerCapture(evt.pointerId);
+    const p = clientToImage(evt);
+
+    // 1) Vertex hit (active polygon) → select & drag the vertex.
+    const v = findVertexHit(p);
+    if (v) {
+      pushHistory();
+      setSelected(v.index);
+      dragging = { kind: 'vertex', index: v.index };
+      render();
+      return;
+    }
+
+    // 2) Edge hit (active polygon) → insert vertex & drag it.
+    const e = findEdgeHit(p);
+    if (e) {
+      pushHistory();
+      active().splice(e.edgeIndex + 1, 0, e.projection);
+      setSelected(e.edgeIndex + 1);
+      dragging = { kind: 'vertex', index: e.edgeIndex + 1 };
+      render();
+      return;
+    }
+
+    // 3) Inside the active polygon's body → drag whole active polygon.
+    if (pointInPolygon(p, active())) {
+      pushHistory();
+      dragging = {
+        kind: 'polygon',
+        start: p,
+        snapshot: active().map(([x, y]) => [x, y]),
+      };
+      return;
+    }
+
+    // 4) Inside an *inactive* polygon's body → switch active to it.
+    const otherIdx = findInactivePolygonHit(p);
+    if (otherIdx !== -1) {
+      pushHistory();
+      setActive(otherIdx);
+      render();
+      return;
+    }
+
+    // 5) Empty space → always append a new vertex to the active zone.
+    //    (Selecting a previous point does NOT block drawing the next one.)
+    pushHistory();
+    active().push(p);
+    setSelected(active().length - 1);
+    dragging = { kind: 'vertex', index: active().length - 1 };
+    render();
+  });
+
+  svg.addEventListener('pointermove', (evt) => {
+    const p = clientToImage(evt);
+
+    // Hover affordance: show 'move' cursor while inside any polygon body.
+    if (!dragging) {
+      const overActive = pointInPolygon(p, active());
+      const overOther = !overActive && findInactivePolygonHit(p) !== -1;
+      svg.style.cursor = (overActive || overOther) ? 'move' : 'default';
+      return;
+    }
+
+    if (dragging.kind === 'vertex') {
+      active()[dragging.index] = [
+        Math.max(0, Math.min(IMG_W, p[0])),
+        Math.max(0, Math.min(IMG_H, p[1])),
+      ];
+      render();
+      return;
+    }
+
+    if (dragging.kind === 'polygon') {
+      // Translate every vertex by (p - start), clamped so the bounding box
+      // stays inside [0,IMG_W] × [0,IMG_H]. No vertex ever leaves the frame.
+      const dx = p[0] - dragging.start[0];
+      const dy = p[1] - dragging.start[1];
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const [x, y] of dragging.snapshot) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      const cdx = Math.max(-minX, Math.min(IMG_W - maxX, dx));
+      const cdy = Math.max(-minY, Math.min(IMG_H - maxY, dy));
+      polygons[activeIndex] = dragging.snapshot.map(([x, y]) => [
+        Math.round(x + cdx),
+        Math.round(y + cdy),
+      ]);
+      render();
+    }
+  });
+  svg.addEventListener('pointerup', () => { dragging = null; });
+  svg.addEventListener('pointercancel', () => { dragging = null; });
+
+  // Top-level click delegation — handles dock buttons + zone chips + zone deletes.
+  root.addEventListener('click', (evt) => {
+    // Zone delete (×) button — match before the chip handler.
+    const zoneDel = evt.target.closest('[data-zone-delete]');
+    if (zoneDel) {
+      evt.stopPropagation();
+      deleteZone(parseInt(zoneDel.dataset.zoneDelete, 10));
+      return;
+    }
+    // Zone chip — switch active zone.
+    const zoneChip = evt.target.closest('[data-zone]');
+    if (zoneChip) {
+      const i = parseInt(zoneChip.dataset.zone, 10);
+      if (i !== activeIndex) {
+        pushHistory();
+        setActive(i);
+        render();
+      }
+      return;
+    }
+
+    const btn = evt.target.closest('[data-action]');
+    if (!btn) return;
+    const action = btn.dataset.action;
+    if (action === 'rect') {
+      pushHistory();
+      const ix = IMG_W * 0.2, iy = IMG_H * 0.2;
+      polygons[activeIndex] = [
+        [Math.round(ix), Math.round(iy)],
+        [Math.round(IMG_W - ix), Math.round(iy)],
+        [Math.round(IMG_W - ix), Math.round(IMG_H - iy)],
+        [Math.round(ix), Math.round(IMG_H - iy)],
+      ];
+      setSelected(null);
+      render();
+    } else if (action === 'clear') {
+      pushHistory(); polygons[activeIndex] = []; setSelected(null); render();
+    } else if (action === 'add-zone') {
+      addZone();
+    } else if (action === 'undo') {
+      undo();
+    } else if (action === 'delete-selected') {
+      deleteSelected();
+    } else if (action === 'deselect') {
+      setSelected(null); render();
+    } else if (action === 'cancel') {
+      const hasContent = polygons.some(p => p.length > 0);
+      if (hasContent && !confirm('Discard changes?')) return;
+      polygons = [[]]; activeIndex = 0; setSelected(null); HISTORY.length = 0; render();
+    } else if (action === 'save') {
+      // Manager-API format: each polygon serialised as "x,y;x,y;..." —
+      // matches manager-api/core/models/polygon_fields.py and the Manager UI
+      // per-polygon text fields. Multi-polygon → array of those strings.
+      const validPolys = polygons.filter(p => p.length >= 3);
+      const managerFormat = validPolys.map(poly =>
+        poly.map(([x, y]) => `${x},${y}`).join(';')
+      );
+      console.log('[Fast → Furious] PUT /api/v1/stores/{loc}/cameras/{uid}/polygons/', managerFormat);
+      const body = managerFormat.length
+        ? managerFormat.map((s, i) => `Polygon ${i + 1}: ${s}`).join('\n\n')
+        : '(no valid polygons)';
+      alert('Polygons to save (Manager format):\n\n' + body);
+    }
+  });
+
+  render();
+}
+
+mount('phone');
+</script>
+</body>
+</html>
